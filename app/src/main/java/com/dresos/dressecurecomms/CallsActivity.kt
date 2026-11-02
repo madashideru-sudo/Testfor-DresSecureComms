@@ -28,6 +28,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class CallsActivity : AppCompatActivity() {
+
     private lateinit var b: ActivityCallsBinding
     private lateinit var adapter: TwoLineAdapter<CallHistory.Entry>
     private var pendingDeleteId: Long? = null
@@ -38,8 +39,10 @@ class CallsActivity : AppCompatActivity() {
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { g ->
             if (g) place() else snack("Call permission denied")
         }
+
     private val requestReadLog =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { reload() }
+
     private val requestWriteLog =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { g ->
             if (g) {
@@ -56,29 +59,27 @@ class CallsActivity : AppCompatActivity() {
         applyScreenshotPolicy()
         b = ActivityCallsBinding.inflate(layoutInflater)
         setContentView(b.root)
+
         b.toolbar.title = getString(R.string.card_calls_title)
         b.toolbar.setNavigationIcon(R.drawable.ic_back)
         b.toolbar.setNavigationOnClickListener { finish() }
         b.toolbar.menu.add(0, 1, 0, "Clear call history").setOnMenuItemClickListener { confirmClear(); true }
 
-        adapter = TwoLineAdapter(
-            this,
-            emptyList(),
-            bind = { e ->
-                val prefix = when (e.type) {
-                    android.provider.CallLog.Calls.BLOCKED_TYPE -> "[Bloqueada] "
-                    android.provider.CallLog.Calls.INCOMING_TYPE, android.provider.CallLog.Calls.OUTGOING_TYPE -> "[Aceita] "
-                    android.provider.CallLog.Calls.REJECTED_TYPE, android.provider.CallLog.Calls.MISSED_TYPE -> "[Recusada] "
-                    else -> ""
-                }
-                Triple(nameFor(e.number), "$prefix${CallHistory.typeLabel(e.type)}${durationLabel(e.duration)}", TimeFmt.rel(e.date))
-            },
-            colorBind = { e -> CallHistory.colorForType(e.type) }
-        )
+        adapter = TwoLineAdapter(this, emptyList()) { e ->
+            val prefix = when (e.type) {
+                android.provider.CallLog.Calls.BLOCKED_TYPE -> "[Bloqueada] "
+                android.provider.CallLog.Calls.INCOMING_TYPE, android.provider.CallLog.Calls.OUTGOING_TYPE -> "[Aceita] "
+                android.provider.CallLog.Calls.REJECTED_TYPE, android.provider.CallLog.Calls.MISSED_TYPE -> "[Recusada] "
+                else -> ""
+            }
+            Triple(nameFor(e.number), "$prefix${CallHistory.typeLabel(e.type)}${durationLabel(e.duration)}", TimeFmt.rel(e.date))
+        }
+        adapter.colorBind = { e -> CallHistory.colorForType(e.type) }
+
         b.list.adapter = adapter
         b.list.setOnItemClickListener { _, _, pos, _ -> entryActions(adapter.getItem(pos)) }
-        b.number.doAfterTextChanged { applyFilter() }
 
+        b.number.doAfterTextChanged { applyFilter() }
         intent.getStringExtra("number")?.let { b.number.setText(it) }
         (if (intent?.data?.scheme == "tel") intent.data?.schemeSpecificPart else null)?.let { b.number.setText(it) }
 
@@ -94,6 +95,7 @@ class CallsActivity : AppCompatActivity() {
             if (field == null) { b.number.setText(text) } else { field.insert(field.length, text) }
             b.number.setSelection(b.number.text?.length ?: 0)
         }
+
         b.backspaceBtn.setOnClickListener {
             val field = b.number.text ?: return@setOnClickListener
             if (field.isNotEmpty()) field.delete(field.length - 1, field.length)
@@ -129,94 +131,99 @@ class CallsActivity : AppCompatActivity() {
         val q = b.number.text?.toString()?.trim()?.lowercase().orEmpty()
         adapter.setItems(
             if (q.isEmpty()) all
-            else all.filter { nameFor(it.number).lowercase().contains(q) || it.number.lowercase().contains(q) }
+            else all.filter {
+                it.number.lowercase().contains(q) ||
+                    (nameByNumber[it.number]?.lowercase()?.contains(q) == true)
+            }
         )
     }
 
-    private fun durationLabel(seconds: Long): String {
-        if (seconds <= 0L) return ""
-        val m = seconds / 60
-        val s = seconds % 60
-        return if (m > 0) " · ${m}m ${s}s" else " · ${s}s"
+    private fun nameFor(number: String): String {
+        val name = nameByNumber[number]
+        return if (name.isNullOrBlank()) number else "$name  ($number)"
     }
 
-    private fun nameFor(number: String): String = nameByNumber[number] ?: number
+    private fun durationLabel(d: Long): String =
+        if (d <= 0L) "" else " · ${d / 60}m ${d % 60}s"
 
     private fun entryActions(e: CallHistory.Entry) {
-        val labels = ArrayList<String>()
-        val actions = ArrayList<() -> Unit>()
-
-        labels.add("Call")
-        actions.add {
-            b.number.setText(e.number)
-            if (hasCall()) place() else requestCall.launch(Manifest.permission.CALL_PHONE)
-        }
-        labels.add("Message")
-        actions.add {
-            startActivity(Intent(this, ThreadActivity::class.java).putExtra("address", e.number))
-        }
-        if (!Contacts.isSaved(this, e.number)) {
-            labels.add("Save to contacts")
-            actions.add { Actions.saveToContacts(this, e.number) }
-        }
-        if (SpamStore.isBlocked(this, e.number)) {
-            labels.add("Unblock number")
-            actions.add { SpamStore.allow(this, e.number); snack("Calls from this number are allowed again.") }
-        } else {
-            labels.add("Block number")
-            actions.add { SpamStore.block(this, e.number, "blocked by you"); snack("Calls from this number will be blocked.") }
-        }
-        labels.add("Copy number")
-        actions.add { Actions.copy(this, "number", e.number); snack(getString(R.string.number_copied)) }
-        labels.add("Delete")
-        actions.add { deleteEntry(e.id) }
-
+        val blocked = SpamStore.isBlocked(this, e.number)
+        val opts = arrayOf(
+            "Call back",
+            "Copy number",
+            if (blocked) "Unblock number" else "Block number",
+            "Delete from history"
+        )
         MaterialAlertDialogBuilder(this)
             .setTitle(nameFor(e.number))
-            .setItems(labels.toTypedArray()) { _, which -> actions[which]() }
+            .setItems(opts) { _, which ->
+                when (which) {
+                    0 -> { b.number.setText(e.number); b.callBtn.performClick() }
+                    1 -> { Actions.copy(this, e.number, "Copied"); snack("Copied to clipboard") }
+                    2 -> {
+                        if (blocked) {
+                            SpamStore.allow(this, e.number)
+                            snack("Unblocked ${e.number}")
+                        } else {
+                            SpamStore.block(this, e.number, "Blocked from call history")
+                            snack("Blocked ${e.number}")
+                        }
+                    }
+                    3 -> deleteEntry(e.id)
+                }
+            }
             .show()
     }
 
     private fun deleteEntry(id: Long) {
+        pendingDeleteId = id
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_CALL_LOG) == PackageManager.PERMISSION_GRANTED) {
-            CallHistory.delete(this, id); reload()
+            CallHistory.delete(this, id)
+            reload()
         } else {
-            pendingDeleteId = id
             requestWriteLog.launch(Manifest.permission.WRITE_CALL_LOG)
         }
     }
 
     private fun confirmClear() {
         MaterialAlertDialogBuilder(this)
-            .setTitle("Clear call history")
-            .setMessage("Delete all call history?")
-            .setPositiveButton("Delete") { _, _ ->
+            .setTitle("Clear call history?")
+            .setMessage("This cannot be undone.")
+            .setPositiveButton("Clear") { _, _ ->
+                pendingClear = true
                 if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_CALL_LOG) == PackageManager.PERMISSION_GRANTED) {
-                    CallHistory.clear(this); reload()
+                    CallHistory.clear(this)
+                    pendingClear = false
+                    reload()
                 } else {
-                    pendingClear = true
                     requestWriteLog.launch(Manifest.permission.WRITE_CALL_LOG)
                 }
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(android.R.string.cancel, null)
             .show()
     }
 
-    private fun hasCall() =
-        ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
-
     private fun place() {
-        val n = b.number.text.toString().trim()
-        if (n.isEmpty()) return
+        val raw = b.number.text?.toString()?.trim().orEmpty()
+        if (raw.isEmpty()) return
+        val uri = Uri.parse("tel:${Uri.encode(raw)}")
+        val tm = getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
         try {
-            val tm = getSystemService(Context.TELECOM_SERVICE) as TelecomManager
-            tm.placeCall(Uri.fromParts("tel", n, null), Bundle())
+            if (tm != null && ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED) {
+                tm.placeCall(uri, Bundle())
+            } else {
+                startActivity(Intent(Intent.ACTION_CALL, uri))
+            }
         } catch (e: SecurityException) {
-            snack("Call permission denied")
+            snack("Permission denied")
         } catch (e: Exception) {
-            snack("Could not place the call: ${e.message}")
+            snack("Could not place call: ${e.message}")
         }
     }
 
-    private fun snack(s: String) = Snackbar.make(b.root, s, Snackbar.LENGTH_LONG).show()
+    private fun hasCall(): Boolean =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
+
+    private fun snack(msg: String) =
+        Snackbar.make(b.root, msg, Snackbar.LENGTH_LONG).show()
 }

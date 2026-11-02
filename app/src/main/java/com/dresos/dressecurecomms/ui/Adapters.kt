@@ -18,9 +18,19 @@ import com.dresos.dressecurecomms.data.SmsRepository
 class TwoLineAdapter<T>(
     ctx: Context,
     private var items: List<T>,
-    private val bind: (T) -> Triple<String, String, String>,
-    private val colorBind: ((T) -> Int)? = null
+    private val bind: (T) -> Triple<String, String, String>
 ) : BaseAdapter() {
+
+    var colorBind: ((T) -> Int)? = null
+
+    constructor(
+        ctx: Context,
+        items: List<T>,
+        colorBind: ((T) -> Int)?,
+        bind: (T) -> Triple<String, String, String>
+    ) : this(ctx, items, bind) {
+        this.colorBind = colorBind
+    }
 
     private val inflater = LayoutInflater.from(ctx)
 
