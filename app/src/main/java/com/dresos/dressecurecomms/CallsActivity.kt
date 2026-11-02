@@ -61,9 +61,20 @@ class CallsActivity : AppCompatActivity() {
         b.toolbar.setNavigationOnClickListener { finish() }
         b.toolbar.menu.add(0, 1, 0, "Clear call history").setOnMenuItemClickListener { confirmClear(); true }
 
-        adapter = TwoLineAdapter(this, emptyList()) { e ->
-            Triple(nameFor(e.number), "${CallHistory.typeLabel(e.type)}${durationLabel(e.duration)}", TimeFmt.rel(e.date))
-        }
+        adapter = TwoLineAdapter(
+            this,
+            emptyList(),
+            bind = { e ->
+                val prefix = when (e.type) {
+                    android.provider.CallLog.Calls.BLOCKED_TYPE -> "[Bloqueada] "
+                    android.provider.CallLog.Calls.INCOMING_TYPE, android.provider.CallLog.Calls.OUTGOING_TYPE -> "[Aceita] "
+                    android.provider.CallLog.Calls.REJECTED_TYPE, android.provider.CallLog.Calls.MISSED_TYPE -> "[Recusada] "
+                    else -> ""
+                }
+                Triple(nameFor(e.number), "$prefix${CallHistory.typeLabel(e.type)}${durationLabel(e.duration)}", TimeFmt.rel(e.date))
+            },
+            colorBind = { e -> CallHistory.colorForType(e.type) }
+        )
         b.list.adapter = adapter
         b.list.setOnItemClickListener { _, _, pos, _ -> entryActions(adapter.getItem(pos)) }
         b.number.doAfterTextChanged { applyFilter() }

@@ -4,6 +4,7 @@ package com.dresos.dressecurecomms
 import android.os.Build
 import android.telecom.Call
 import android.telecom.CallScreeningService
+import com.dresos.dressecurecomms.data.CallHistory
 import com.dresos.dressecurecomms.data.SpamStore
 import com.dresos.dressecurecomms.scan.SpamFilter
 
@@ -11,7 +12,6 @@ class CallScreenService : CallScreeningService() {
 
     override fun onScreenCall(callDetails: Call.Details) {
         val builder = CallResponse.Builder()
-
         if (!isIncoming(callDetails)) {
             respondToCall(callDetails, builder.build())
             return
@@ -30,10 +30,15 @@ class CallScreenService : CallScreeningService() {
                 builder.setRejectCall(true)
                 builder.setSkipNotification(true)
                 record(number, result.reason)
+                // Automatically record blocked call in CallHistory so it appears in red
+                val numToLog = number?.trim()?.ifEmpty { "Número Oculto" } ?: "Número Oculto"
+                CallHistory.recordBlocked(this, numToLog, result.reason)
             }
+
             SpamFilter.Action.SILENCE -> {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) builder.setSilenceCall(true)
             }
+
             SpamFilter.Action.ALLOW -> {
             }
         }

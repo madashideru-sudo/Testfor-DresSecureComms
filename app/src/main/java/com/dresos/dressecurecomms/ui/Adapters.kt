@@ -18,18 +18,28 @@ import com.dresos.dressecurecomms.data.SmsRepository
 class TwoLineAdapter<T>(
     ctx: Context,
     private var items: List<T>,
-    private val bind: (T) -> Triple<String, String, String>
+    private val bind: (T) -> Triple<String, String, String>,
+    private val colorBind: ((T) -> Int)? = null
 ) : BaseAdapter() {
+
     private val inflater = LayoutInflater.from(ctx)
+
     fun setItems(list: List<T>) { items = list; notifyDataSetChanged() }
     override fun getCount() = items.size
     override fun getItem(position: Int): T = items[position]
     override fun getItemId(position: Int) = position.toLong()
+
     override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
         val v = convertView ?: inflater.inflate(R.layout.item_two_line, parent, false)
-        val (a, b, c) = bind(items[position])
-        v.findViewById<TextView>(R.id.line1).text = a
-        v.findViewById<TextView>(R.id.line2).text = b
+        val item = items[position]
+        val (a, b, c) = bind(item)
+        val line1 = v.findViewById<TextView>(R.id.line1)
+        val line2 = v.findViewById<TextView>(R.id.line2)
+        line1.text = a
+        line2.text = b
+        colorBind?.invoke(item)?.let { color ->
+            line2.setTextColor(color)
+        }
         val time = v.findViewById<TextView>(R.id.time)
         time.text = c
         time.visibility = if (c.isEmpty()) View.GONE else View.VISIBLE
@@ -41,11 +51,14 @@ class MessageAdapter(
     ctx: Context,
     private var items: List<SmsRepository.Msg>
 ) : BaseAdapter() {
+
     private val inflater = LayoutInflater.from(ctx)
+
     fun setItems(list: List<SmsRepository.Msg>) { items = list; notifyDataSetChanged() }
     override fun getCount() = items.size
     override fun getItem(position: Int): SmsRepository.Msg = items[position]
     override fun getItemId(position: Int) = position.toLong()
+
     override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
         val v = convertView ?: inflater.inflate(R.layout.item_message, parent, false)
         val m = items[position]
