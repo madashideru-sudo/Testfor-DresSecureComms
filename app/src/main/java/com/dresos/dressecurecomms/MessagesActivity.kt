@@ -1,0 +1,251 @@
+/* Copyright © 2026 The DresOS Foundation. Licensed under the Apache License, Version 2.0. */
+package com.dresos.dressecurecomms
+
+import com.dresos.dressecurecomms.util.SecureKeys
+
+import android.Manifest
+import android.content.Intent
+import android.os.Build
+import android.os.Bundle
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import com.dresos.dressecurecomms.util.applyScreenshotPolicy
+import androidx.preference.PreferenceManager
+import com.dresos.dressecurecomms.util.Actions
+import com.dresos.dressecurecomms.util.Diagnostics
+import com.dresos.dressecurecomms.util.Contacts
+import com.dresos.dressecurecomms.util.TimeFmt
+import androidx.core.widget.doAfterTextChanged
+import com.dresos.dressecurecomms.data.SmsRepository
+import com.dresos.dressecurecomms.databinding.ActivityMessagesBinding
+import com.dresos.dressecurecomms.ui.TwoLineAdapter
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+
+class MessagesActivity : AppCompatActivity() {
+    private lateinit var b: ActivityMessagesBinding
+    private val prefs by lazy { PreferenceManager.getDefaultSharedPreferences(this) }
+    private lateinit var adapter: TwoLineAdapter<SmsRepository.Conversation>
+
+    private val requestSmsRead =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { reload() }
+    private val requestSmsRole =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { reload() }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        applyScreenshotPolicy()
+        b = ActivityMessagesBinding.inflate(layoutInflater)
+        setContentView(b.root)
+        b.toolbar.title = getString(R.string.card_messages_title)
+        b.toolbar.setNavigationIcon(R.drawable.ic_back)
+        b.toolbar.setNavigationOnClickListener { finish() }
+
+        adapter = TwoLineAdapter(this, emptyList()) { c -> Triple(nameFor(c.address), c.snippet, TimeFmt.rel(c.time)) }
+        b.list.adapter = adapter
+        b.list.emptyView = b.empty
+        b.list.setOnItemClickListener { _, _, pos, _ ->
+            val c = adapter.getItem(pos)
+            openThread(c.address, c.threadId)
+        }
+        b.list.setOnItemLongClickListener { _, _, pos, _ ->
+            conversationActions(adapter.getItem(pos)); true
+        }
+        b.fab.setOnClickListener { newMessage() }
+        b.search.doAfterTextChanged { applyFilter() }
+
+        requestSmsRead.launch(Manifest.permission.READ_SMS)
+    }
+
+    override fun onResume() { super.onResume(); reload(); promptDefaultIfNeeded() }
+
+    private var nameByNumber: Map<String, String> = emptyMap()
+    private var all: List<SmsRepository.Conversation> = emptyList()
+
+    private fun reload() {
+        val key = SecureKeys.smsKey(this)
+        lifecycleScope.launch {
+            val (items, names) = withContext(Dispatchers.IO) {
+                val convs = SmsRepository.conversations(this@MessagesActivity, key)
+                val map = Contacts.nameMap(this@MessagesActivity, convs.map { it.address })
+                convs to map
+            }
+            nameByNumber = names
+            all = items
+            applyFilter()
+        }
+    }
+
+    private fun applyFilter() {
+        val q = b.search.text?.toString()?.trim()?.lowercase().orEmpty()
+        adapter.setItems(
+            if (q.isEmpty()) all
+            else all.filter {
+                nameFor(it.address).lowercase().contains(q) ||
+                    it.snippet.lowercase().contains(q) ||
+                    it.address.lowercase().contains(q)
+            }
+        )
+    }
+
+    private fun nameFor(address: String): String = nameByNumber[address] ?: address
+
+    private fun newMessage() {
+        val input = android.widget.AutoCompleteTextView(this).apply {
+            hint = "Name, or number, or several separated by commas"
+            threshold = 1
+            setSingleLine(true)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        }
+        val pad = (16 * resources.displayMetrics.density).toInt()
+        val wrap = android.widget.LinearLayout(this).apply { setPadding(pad, pad, pad, 0); addView(input) }
+
+        lifecycleScope.launch {
+            val people = withContext(Dispatchers.IO) { Contacts.suggestions(this@MessagesActivity) }
+            if (people.isEmpty()) return@launch
+            input.setAdapter(
+                android.widget.ArrayAdapter(
+                    this@MessagesActivity,
+                    android.R.layout.simple_dropdown_item_1line,
+                    people
+                )
+            )
+            input.setOnItemClickListener { parent, _, pos, _ ->
+                val picked = parent.getItemAtPosition(pos) as? Contacts.Suggestion ?: return@setOnItemClickListener
+                input.setText(picked.number)
+                input.setSelection(picked.number.length)
+                input.dismissDropDown()
+            }
+        }
+
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.new_message)
+            .setView(wrap)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                val typed = input.text.toString().trim()
+                val n = typed.substringAfter('(').substringBefore(')').trim().ifBlank { typed }
+                if (n.isNotEmpty()) openThread(n)
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun snack(text: String) =
+        com.google.android.material.snackbar.Snackbar.make(b.root, text, com.google.android.material.snackbar.Snackbar.LENGTH_SHORT).show()
+
+    private fun conversationActions(c: SmsRepository.Conversation) {
+        val group = c.address.contains(',') || c.address.contains(';')
+        if (group) {
+            MaterialAlertDialogBuilder(this)
+                .setTitle(nameFor(c.address))
+                .setItems(arrayOf("Open", "Delete")) { _, which ->
+                    when (which) {
+                        0 -> openThread(c.address, c.threadId)
+                        1 -> confirmDelete(c)
+                    }
+                }
+                .show()
+            return
+        }
+        val labels = ArrayList<String>()
+        val actions = ArrayList<() -> Unit>()
+        labels.add("Call")
+        actions.add { Actions.dial(this, c.address) }
+        labels.add("Message")
+        actions.add { openThread(c.address, c.threadId) }
+        if (!Contacts.isSaved(this, c.address)) {
+            labels.add("Save to contacts")
+            actions.add { Actions.saveToContacts(this, c.address) }
+        }
+        labels.add("Copy number")
+        actions.add { Actions.copy(this, "number", c.address); snack(getString(R.string.number_copied)) }
+        labels.add("Delete")
+        actions.add { confirmDelete(c) }
+        labels.add(getString(R.string.diag_action))
+        actions.add { showDiagnostics(c.address) }
+
+        MaterialAlertDialogBuilder(this)
+            .setTitle(nameFor(c.address))
+            .setItems(labels.toTypedArray()) { _, which -> actions[which]() }
+            .show()
+    }
+
+    private fun showDiagnostics(address: String) {
+        lifecycleScope.launch {
+            val text = withContext(Dispatchers.IO) { Diagnostics.report(this@MessagesActivity, address) }
+            if (isFinishing || isDestroyed) return@launch
+            MaterialAlertDialogBuilder(this@MessagesActivity)
+                .setTitle(R.string.diag_title)
+                .setMessage(text)
+                .setPositiveButton(android.R.string.ok, null)
+                .setNeutralButton(R.string.diag_copy) { _, _ ->
+                    Actions.copy(this@MessagesActivity, "diagnostic", text)
+                    snack(getString(R.string.diag_copied))
+                }
+                .show()
+        }
+    }
+
+    private fun confirmDelete(c: SmsRepository.Conversation) {
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Delete conversation")
+            .setMessage("Delete all messages with ${c.address}?")
+            .setPositiveButton("Delete") { _, _ ->
+                val result = SmsRepository.deleteThread(this, c.threadId, c.address)
+                reload()
+                val msg = when {
+                    !result.isDefault ->
+                        "Set DresSecureComms as the default SMS app to delete texts. Settings, Apps, Default apps, SMS app."
+                    result.removed > 0 -> "Conversation deleted."
+                    else -> "Conversation cleared."
+                }
+                com.google.android.material.snackbar.Snackbar.make(
+                    b.root, msg, com.google.android.material.snackbar.Snackbar.LENGTH_LONG
+                ).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun openThread(address: String, threadId: Long = -1L) {
+        startActivity(
+            Intent(this, ThreadActivity::class.java)
+                .putExtra("address", address)
+                .putExtra("threadId", threadId)
+        )
+    }
+
+    private var defaultBanner: com.google.android.material.snackbar.Snackbar? = null
+
+    private fun promptDefaultIfNeeded() {
+        if (SmsRepository.isDefault(this)) {
+            defaultBanner?.dismiss()
+            defaultBanner = null
+            return
+        }
+        if (defaultBanner?.isShown == true) return
+        defaultBanner = com.google.android.material.snackbar.Snackbar.make(
+            b.root,
+            "DresSecureComms is not your default SMS app. Set it to send, receive, and delete texts.",
+            com.google.android.material.snackbar.Snackbar.LENGTH_INDEFINITE
+        ).setAction("Set default") { launchSmsRole() }.also { it.show() }
+    }
+
+    private fun launchSmsRole() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val rm = getSystemService(android.app.role.RoleManager::class.java)
+            if (rm != null && rm.isRoleAvailable(android.app.role.RoleManager.ROLE_SMS)) {
+                requestSmsRole.launch(rm.createRequestRoleIntent(android.app.role.RoleManager.ROLE_SMS))
+                return
+            }
+        }
+        requestSmsRole.launch(
+            Intent(android.provider.Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT)
+                .putExtra(android.provider.Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, packageName)
+        )
+    }
+}

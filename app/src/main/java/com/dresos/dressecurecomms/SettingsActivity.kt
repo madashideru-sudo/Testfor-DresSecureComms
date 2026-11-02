@@ -1,0 +1,194 @@
+/* Copyright © 2026 The DresOS Foundation. Licensed under the Apache License, Version 2.0. */
+package com.dresos.dressecurecomms
+
+import android.app.role.RoleManager
+import android.content.Intent
+import android.os.Build
+import android.os.Bundle
+import android.provider.Telephony
+import android.telecom.TelecomManager
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.RequiresApi
+import androidx.appcompat.app.AppCompatActivity
+import androidx.preference.EditTextPreference
+import androidx.preference.Preference
+import androidx.preference.PreferenceFragmentCompat
+import androidx.appcompat.app.AppCompatDelegate
+import androidx.core.os.LocaleListCompat
+import androidx.preference.ListPreference
+import com.dresos.dressecurecomms.data.SpamStore
+import com.dresos.dressecurecomms.location.MockLocation
+import com.dresos.dressecurecomms.util.applyScreenshotPolicy
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import kotlin.random.Random
+
+class SettingsActivity : AppCompatActivity() {
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        applyScreenshotPolicy()
+        supportFragmentManager.beginTransaction()
+            .replace(android.R.id.content, Prefs())
+            .commit()
+    }
+
+    class Prefs : PreferenceFragmentCompat() {
+
+        private val roleLauncher =
+            registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { }
+
+        override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
+            setPreferencesFromResource(R.xml.preferences, rootKey)
+
+            findPreference<Preference>("default_sms")?.setOnPreferenceClickListener { requestSms(); true }
+            findPreference<ListPreference>("language_pref")?.let { pref ->
+                pref.value = AppCompatDelegate.getApplicationLocales().toLanguageTags()
+                pref.setOnPreferenceChangeListener { _, newValue ->
+                    val tag = newValue as String
+                    val locales = if (tag.isEmpty()) LocaleListCompat.getEmptyLocaleList()
+                        else LocaleListCompat.forLanguageTags(tag)
+                    AppCompatDelegate.setApplicationLocales(locales)
+                    true
+                }
+            }
+            findPreference<Preference>("default_phone")?.setOnPreferenceClickListener { requestPhone(); true }
+            findPreference<Preference>("default_screen")?.setOnPreferenceClickListener { requestScreen(); true }
+
+            findPreference<Preference>("spam_add_pattern")?.setOnPreferenceClickListener {
+                addPatternDialog(); true
+            }
+
+            findPreference<Preference>("spam_manage")?.setOnPreferenceClickListener {
+                blockedNumbers(); true
+            }
+
+            findPreference<Preference>("share_crash_log")?.setOnPreferenceClickListener {
+                com.dresos.dressecurecomms.util.CrashLog.share(requireActivity()); true
+            }
+
+            findPreference<Preference>("geo_random")?.setOnPreferenceClickListener {
+                val lat = Random.nextDouble(-90.0, 90.0)
+                val lng = Random.nextDouble(-180.0, 180.0)
+                findPreference<EditTextPreference>("mock_lat")?.text = String.format("%.6f", lat)
+                findPreference<EditTextPreference>("mock_long")?.text = String.format("%.6f", lng)
+                toast(String.format("Random: %.4f, %.4f", lat, lng))
+                true
+            }
+
+            findPreference<Preference>("geo_apply")?.setOnPreferenceClickListener {
+                val lat = findPreference<EditTextPreference>("mock_lat")?.text?.toDoubleOrNull()
+                val lng = findPreference<EditTextPreference>("mock_long")?.text?.toDoubleOrNull()
+                if (lat == null || lng == null) toast("Set or randomize a location first")
+                else toast(MockLocation.apply(requireContext(), lat, lng))
+                true
+            }
+
+            findPreference<Preference>("geo_clear")?.setOnPreferenceClickListener {
+                toast(MockLocation.clear(requireContext()))
+                true
+            }
+        }
+
+        private fun addPatternDialog() {
+            val ctx = requireContext()
+            val input = EditText(ctx).apply {
+                hint = "e.g. 0* (or +1800*)"
+            }
+            val pad = (20 * resources.displayMetrics.density).toInt()
+            val wrap = LinearLayout(ctx).apply {
+                setPadding(pad, pad / 2, pad, 0)
+                addView(input)
+            }
+
+            MaterialAlertDialogBuilder(ctx)
+                .setTitle("Block prefix pattern")
+                .setMessage("Enter a number prefix followed by * to block all calls starting with that number (e.g. 0* blocks all calls beginning with 0).")
+                .setView(wrap)
+                .setPositiveButton("Block") { _, _ ->
+                    val text = input.text.toString().trim()
+                    if (text.isNotEmpty()) {
+                        val pattern = if (text.endsWith("*")) text else text + "*"
+                        SpamStore.block(ctx, pattern, "Prefix wildcard rule ($pattern)")
+                        toast("Blocked all calls matching: $pattern")
+                    }
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+
+        private fun blockedNumbers() {
+            val ctx = requireContext()
+            val rules = SpamStore.load(ctx).filter { it.blocked }
+            if (rules.isEmpty()) {
+                toast("Nothing is blocked yet")
+                return
+            }
+
+            val labels = rules.map { rule ->
+                val type = if (rule.number.endsWith("*")) "[Prefix Rule]" else "[Number]"
+                "$type ${rule.number}  (${rule.reason})"
+            }.toTypedArray()
+
+            MaterialAlertDialogBuilder(ctx)
+                .setTitle(R.string.set_spam_manage_title)
+                .setItems(labels) { _, which ->
+                    val rule = rules[which]
+                    MaterialAlertDialogBuilder(ctx)
+                        .setTitle(rule.number)
+                        .setMessage("Blocked because: ${rule.reason}")
+                        .setPositiveButton("Unblock") { _, _ ->
+                            SpamStore.remove(ctx, rule.number)
+                            toast("Calls matching ${rule.number} are allowed again")
+                        }
+                        .setNegativeButton("Keep blocked", null)
+                        .show()
+                }
+                .setNeutralButton("Clear all") { _, _ ->
+                    SpamStore.clear(ctx)
+                    toast("Block list cleared")
+                }
+                .setNegativeButton("Close", null)
+                .show()
+        }
+
+        private fun requestSms() {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                requestRole(RoleManager.ROLE_SMS)
+            } else {
+                roleLauncher.launch(
+                    Intent(Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT)
+                        .putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, requireContext().packageName)
+                )
+            }
+        }
+
+        private fun requestPhone() {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                requestRole(RoleManager.ROLE_DIALER)
+            } else {
+                roleLauncher.launch(
+                    Intent(TelecomManager.ACTION_CHANGE_DEFAULT_DIALER)
+                        .putExtra(TelecomManager.EXTRA_CHANGE_DEFAULT_DIALER_PACKAGE_NAME, requireContext().packageName)
+                )
+            }
+        }
+
+        private fun requestScreen() {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) requestRole(RoleManager.ROLE_CALL_SCREENING)
+            else toast("Requires Android 10 or newer")
+        }
+
+        @RequiresApi(Build.VERSION_CODES.Q)
+        private fun requestRole(role: String) {
+            val rm = requireContext().getSystemService(RoleManager::class.java)
+            if (rm == null || !rm.isRoleAvailable(role)) { toast("Not available on this device"); return }
+            if (rm.isRoleHeld(role)) { toast("Already set as default"); return }
+            roleLauncher.launch(rm.createRequestRoleIntent(role))
+        }
+
+        private fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+    }
+}
